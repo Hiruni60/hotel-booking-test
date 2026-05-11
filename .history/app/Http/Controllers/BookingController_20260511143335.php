@@ -1,0 +1,195 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\Booking;
+use App\Models\Room;
+use App\Models\Guest;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+
+class BookingController extends Controller
+{
+    public function index()
+    {
+        $bookings = Booking::with('room')->latest()->get();
+        return view('bookings.index', compact('bookings'));
+    }
+
+    public function create()
+    {
+        $rooms = Room::where('status', 'available')->get();
+        return view('bookings.create', compact('rooms'));
+    }
+
+    public function store(Request $request)
+    {
+         $request->validate([
+        'room_id' => 'required',
+        'guest_name' => 'required',
+        'guest_email' => 'nullable|email',
+        'guest_phone' => 'required',
+        'check_in' => 'required|date',
+        'check_out' => 'required|date|after_or_equal:check_in',
+    
+    ]);
+
+    // 1. Create guest
+    $guest = Guest::create([
+        'name' => $request->guest_name,
+        'email' => $request->guest_email,
+        'phone' => $request->guest_phone,
+    ]);
+
+    // 2. Create booking
+    Booking::create([
+        'room_id' => $request->room_id,
+        'user_id' => Auth::id(),   // STAFF WHO BOOKED
+        'guest_id' => $guest->id,  // CUSTOMER
+        'check_in' => $request->check_in,
+        'check_out' => $request->check_out,
+        'status' => 'confirmed'
+    ]);
+
+     //  UPDATE ROOM STATUS → OCCUPIED
+    Room::where('id', $request->room_id)
+        ->update(['status' => 'occupied']);
+
+
+    return redirect()->route('bookings.index')
+        ->with('success', 'Booking created successfully');
+    }
+
+    public function edit($id)
+{
+    $booking = Booking::with('guest')->findOrFail($id);
+    $rooms = Room::all();
+
+    return view('bookings.edit', compact('booking', 'rooms'));
+}
+
+    
+
+public function update(Request $request, $id)
+{
+    $booking = Booking::with('guest')->findOrFail($id);
+
+    $request->validate([
+        'room_id' => 'required|exists:rooms,id',
+        'guest_name' => 'required',
+        'guest_email' => 'nullable|email',
+        'guest_phone' => 'required',
+        'check_in' => 'required|date',
+        'check_out' => 'required|date|after_or_equal:check_in',
+        'status' => 'required|in:confirmed,cancelled,completed'
+    ]);
+
+    // UPDATE GUEST
+    
+    $booking->guest->update([
+        'name' => $request->guest_name,
+        'email' => $request->guest_email,
+        'phone' => $request->guest_phone,
+    ]);
+
+    // HANDLE ROOM CHANGE LOGIC
+    
+    if ($booking->room_id != $request->room_id) {
+
+        // Free OLD room
+        Room::where('id', $booking->room_id)
+            ->update(['status' => 'available']);
+
+        // Occupy NEW room
+        Room::where('id', $request->room_id)
+            ->update(['status' => 'occupied']);
+    }
+
+    // HANDLE BOOKING STATUS RULES
+
+
+    if ($request->status == 'cancelled') {
+
+        // Free room if cancelled
+        Room::where('id', $request->room_id)
+            ->update(['status' => 'available']);
+    }
+
+    if ($request->status == 'completed') {
+
+        // Optional: keep room available after checkout
+        Room::where('id', $request->room_id)
+            ->update(['status' => 'available']);
+    }
+
+    //  UPDATE BOOKING
+    
+    $booking->update([
+        'room_id' => $request->room_id,
+        'check_in' => $request->check_in,
+        'check_out' => $request->check_out,
+        'status' => $request->status,
+    ]);
+
+    return redirect()->route('bookings.index')
+        ->with('success', 'Booking updated successfully');
+}
+
+
+    //booking cansel function
+    public function destroy($id)
+    {
+        $booking = Booking::findOrFail($id);
+
+    //  FREE THE ROOM
+    Room::where('id', $booking->room_id)
+        ->update(['status' => 'available']);
+
+    $booking->delete();
+
+    return redirect()->route('bookings.index')
+        ->with('success', 'Booking cancelled successfully');
+
+        return redirect()->route('bookings.index');
+    }
+
+
+    //history of booking
+        public function history()
+    {
+        $query = Booking::with(['room', 'guest', 'user']);
+
+        // 🔍 SEARCH (guest name OR room number)
+        if ($request->search) {
+            $query->whereHas('guest', function ($q) use ($request) {
+                $q->where('name', 'like', '%' . $request->search . '%');
+            })
+            ->orWhereHas('room', function ($q) use ($request) {
+                $q->where('room_number', 'like', '%' . $request->search . '%');
+            });
+        }
+
+        // 📅 DATE RANGE
+        if ($request->from_date && $request->to_date) {
+            $query->whereBetween('check_in', [
+                $request->from_date,
+                $request->to_date
+            ]);
+        }
+
+        // 📌 STATUS FILTER
+        if ($request->status) {
+            $query->where('status', $request->status);
+        }
+
+        // 🏨 ROOM FILTER
+        if ($request->room_id) {
+            $query->where('room_id', $request->room_id);
+        }
+
+        $bookings = $query->orderBy('created_at', 'desc')->get();
+        $rooms = \App\Models\Room::all();
+
+        return view('bookings.history', compact('bookings', 'rooms'));
+    }
+}
